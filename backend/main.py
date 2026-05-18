@@ -7,19 +7,12 @@ import io
 import logging
 from scipy import stats
 from scipy.signal import find_peaks
-import os
 
 app = FastAPI(title="Audio Deepfake Detector")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://localhost:5174", 
-        "https://audio-deepfake-detector-xi.vercel.app",
-        "https://*.vercel.app",
-        "*"
-    ],
+    allow_origins=["*"],  # Allows any frontend to connect
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -28,48 +21,53 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────────────────────
-#  ADVANCED FEATURE EXTRACTION (Full Version)
+#  ADVANCED FEATURE EXTRACTION FOR AI VOICE DETECTION
+#  Specifically designed to catch ElevenLabs and modern TTS
 # ─────────────────────────────────────────────────────────────
 
 def extract_advanced_features(audio: np.ndarray, sr: int) -> dict:
-    """Extract comprehensive features for AI voice detection"""
+    """Extract features that reveal AI-generated artifacts"""
     
-    # Ensure minimum length (3 seconds minimum for reliable analysis)
+    # Ensure minimum length
     min_samples = sr * 3
     if len(audio) < min_samples:
         audio = np.pad(audio, (0, min_samples - len(audio)))
     
-    # Trim silence from beginning and end
+    # Trim silence
     audio_trimmed, _ = librosa.effects.trim(audio, top_db=25)
-    if len(audio_trimmed) > 0:
+    if len(audio_trimmed) > sr * 0.5:
         audio = audio_trimmed
     
     # Normalize
-    audio = audio / (np.abs(audio).max() + 1e-8)
+    peak = np.abs(audio).max()
+    if peak > 0:
+        audio = audio / peak
     
     hop_length = 256
     n_fft = 2048
     
     # ─────────────────────────────────────────────────────────
-    # MFCC FEATURES (20 coefficients)
+    # 1. MFCC FEATURES (Key for detecting synthetic artifacts)
     # ─────────────────────────────────────────────────────────
-    mfcc = librosa.feature.mfcc(y=audio, sr=sr, n_mfcc=20, n_fft=n_fft, hop_length=hop_length)
+    mfcc = librosa.feature.mfcc(y=audio, sr=sr, n_mfcc=20, hop_length=hop_length)
     mfcc_delta = librosa.feature.delta(mfcc)
     mfcc_delta2 = librosa.feature.delta(mfcc, order=2)
     
     # MFCC statistics - AI voices have less variation
-    mfcc_variance = float(np.var(mfcc))
     mfcc_std_mean = float(np.std(mfcc, axis=1).mean())
     mfcc_std_std = float(np.std(mfcc, axis=1).std())
     mfcc_delta_std = float(np.std(mfcc_delta))
     mfcc_delta2_std = float(np.std(mfcc_delta2))
+    
+    # MFCC high-frequency coefficients (reveal synthesis artifacts)
     mfcc_high_mean = float(mfcc[10:].mean())
     mfcc_high_std = float(mfcc[10:].std())
     
     # ─────────────────────────────────────────────────────────
-    # PITCH FEATURES (Using multiple methods)
+    # 2. PITCH FEATURES (AI voices are too stable)
     # ─────────────────────────────────────────────────────────
     try:
+        # Use multiple pitch detection methods
         # Method 1: piptrack
         pitches, magnitudes = librosa.piptrack(y=audio, sr=sr, hop_length=hop_length)
         pitch_values = []
@@ -106,24 +104,22 @@ def extract_advanced_features(audio: np.ndarray, sr: int) -> dict:
         pitch_std, pitch_range, pitch_mean, pitch_jitter, yin_std = 0, 0, 0, 0, 0
     
     # ─────────────────────────────────────────────────────────
-    # SPECTRAL FEATURES
+    # 3. SPECTRAL FEATURES (AI has unnatural spectral patterns)
     # ─────────────────────────────────────────────────────────
     stft = np.abs(librosa.stft(audio, n_fft=n_fft, hop_length=hop_length))
     freqs = librosa.fft_frequencies(sr=sr, n_fft=n_fft)
     
     # Spectral centroid
     spectral_centroids = librosa.feature.spectral_centroid(y=audio, sr=sr, hop_length=hop_length)[0]
-    centroid_mean = float(np.mean(spectral_centroids))
     centroid_std = float(np.std(spectral_centroids))
+    centroid_mean = float(np.mean(spectral_centroids))
     
     # Spectral bandwidth
     spectral_bandwidth = librosa.feature.spectral_bandwidth(y=audio, sr=sr, hop_length=hop_length)[0]
-    bandwidth_mean = float(np.mean(spectral_bandwidth))
     bandwidth_std = float(np.std(spectral_bandwidth))
     
     # Spectral rolloff
     spectral_rolloff = librosa.feature.spectral_rolloff(y=audio, sr=sr, hop_length=hop_length)[0]
-    rolloff_mean = float(np.mean(spectral_rolloff))
     rolloff_std = float(np.std(spectral_rolloff))
     
     # Spectral flatness (tonal vs noise)
@@ -137,7 +133,7 @@ def extract_advanced_features(audio: np.ndarray, sr: int) -> dict:
     contrast_std = float(np.std(spectral_contrast))
     
     # ─────────────────────────────────────────────────────────
-    # HIGH-FREQUENCY ANALYSIS
+    # 4. HIGH-FREQUENCY ANALYSIS (AI often has unnatural HF)
     # ─────────────────────────────────────────────────────────
     hf_mask = freqs > 6000
     vhf_mask = freqs > 10000
@@ -168,7 +164,7 @@ def extract_advanced_features(audio: np.ndarray, sr: int) -> dict:
         spectral_slope = 0
     
     # ─────────────────────────────────────────────────────────
-    # TEMPORAL FEATURES
+    # 5. TEMPORAL FEATURES (AI has unnatural smoothness)
     # ─────────────────────────────────────────────────────────
     # RMS energy
     rms = librosa.feature.rms(y=audio, hop_length=hop_length)[0]
@@ -190,7 +186,7 @@ def extract_advanced_features(audio: np.ndarray, sr: int) -> dict:
     energy_entropy = float(-np.sum(rms_normalized * np.log2(rms_normalized + 1e-8)))
     
     # ─────────────────────────────────────────────────────────
-    # ARTIFACT DETECTION (Specific to TTS/vocoders)
+    # 6. ARTIFACT DETECTION (Specific to TTS/vocoders)
     # ─────────────────────────────────────────────────────────
     # Spectral flux (rate of spectral change)
     flux = np.sqrt(np.mean(np.diff(stft, axis=1) ** 2, axis=0))
@@ -203,8 +199,9 @@ def extract_advanced_features(audio: np.ndarray, sr: int) -> dict:
     
     # Formant bandwidth (AI often has unnatural formants)
     try:
+        from scipy.signal import find_peaks
         formant_widths = []
-        for frame in stft[:, :50].T:
+        for frame in stft[:, :50].T:  # Check first 50 frames
             peaks, properties = find_peaks(frame, height=np.percentile(frame, 70), width=2)
             if len(peaks) > 0:
                 widths = properties['widths']
@@ -236,7 +233,6 @@ def extract_advanced_features(audio: np.ndarray, sr: int) -> dict:
     
     return {
         # MFCC features
-        "mfcc_variance": mfcc_variance,
         "mfcc_std_mean": mfcc_std_mean,
         "mfcc_std_std": mfcc_std_std,
         "mfcc_delta_std": mfcc_delta_std,
@@ -251,11 +247,8 @@ def extract_advanced_features(audio: np.ndarray, sr: int) -> dict:
         "yin_std": yin_std,
         
         # Spectral features
-        "centroid_mean": centroid_mean,
         "centroid_std": centroid_std,
-        "bandwidth_mean": bandwidth_mean,
         "bandwidth_std": bandwidth_std,
-        "rolloff_mean": rolloff_mean,
         "rolloff_std": rolloff_std,
         "flatness_mean": flatness_mean,
         "flatness_std": flatness_std,
@@ -271,15 +264,12 @@ def extract_advanced_features(audio: np.ndarray, sr: int) -> dict:
         
         # Temporal features
         "rms_std": rms_std,
-        "rms_mean": rms_mean,
         "zcr_std": zcr_std,
-        "zcr_mean": zcr_mean,
         "dynamic_range": dynamic_range,
         "energy_entropy": energy_entropy,
         
         # Artifact features
         "flux_std": flux_std,
-        "flux_mean": flux_mean,
         "spec_irregularity": spec_irregularity,
         "avg_formant_width": avg_formant_width,
         "formant_width_std": formant_width_std,
@@ -288,10 +278,6 @@ def extract_advanced_features(audio: np.ndarray, sr: int) -> dict:
         "mid_high_ratio": mid_high_ratio,
     }
 
-
-# ─────────────────────────────────────────────────────────────
-#  AGGRESSIVE AI CLASSIFIER (Tuned for ElevenLabs)
-# ─────────────────────────────────────────────────────────────
 
 def classify_audio(features: dict) -> tuple:
     """Aggressive classification specifically tuned for modern AI voices"""
@@ -481,45 +467,51 @@ def classify_audio(features: dict) -> tuple:
     elif jitter > 0.8:
         human_score += 6
     
-    # Calculate final confidence
+    # Calculate final percentages
     total_score = ai_score + human_score
     if total_score > 0:
         ai_percentage = (ai_score / total_score) * 100
+        human_percentage = (human_score / total_score) * 100
     else:
         ai_percentage = 50
+        human_percentage = 50
     
-    # Aggressive threshold - tuned for ElevenLabs detection
-    if ai_percentage > 50:
+    # Determine verdict and confidences based on which percentage is higher
+    if ai_percentage > human_percentage:
         verdict = "FAKE"
-        confidence = min(0.95, (ai_percentage - 45) / 55)
-        prob_ai = round(confidence, 4)
-        prob_real = round(1 - prob_ai, 4)
-    elif ai_percentage > 35:
-        verdict = "FAKE"
-        confidence = min(0.90, (ai_percentage - 30) / 70)
-        prob_ai = round(confidence, 4)
-        prob_real = round(1 - prob_ai, 4)
+        # Scale confidence: 50% AI = 0.5, 100% AI = 0.95
+        confidence = min(0.95, 0.5 + (ai_percentage - 50) / 100)
+        prob_fake = round(confidence, 4)
+        prob_real = round(1 - prob_fake, 4)
     else:
         verdict = "REAL"
-        confidence = min(0.95, 1 - (ai_percentage / 35))
+        # Scale confidence: 50% human = 0.5, 100% human = 0.95
+        confidence = min(0.95, 0.5 + (human_percentage - 50) / 100)
         prob_real = round(confidence, 4)
-        prob_ai = round(1 - prob_real, 4)
+        prob_fake = round(1 - prob_real, 4)
+    
+    # Ensure probabilities are not exactly 0.5 for decisive verdict
+    if verdict == "REAL" and prob_real < 0.51:
+        prob_real = 0.51
+        prob_fake = 0.49
+    elif verdict == "FAKE" and prob_fake < 0.51:
+        prob_fake = 0.51
+        prob_real = 0.49
     
     # Log detailed analysis
     logger.info(f"=== AI Detection Results ===")
     logger.info(f"AI Score: {ai_score}, Human Score: {human_score}")
-    logger.info(f"AI Percentage: {ai_percentage:.1f}%")
-    logger.info(f"Verdict: {verdict} (Real: {prob_real:.1%}, AI: {prob_ai:.1%})")
+    logger.info(f"AI: {ai_percentage:.1f}% | Human: {human_percentage:.1f}%")
+    logger.info(f"Verdict: {verdict} (Real: {prob_real:.1%}, AI: {prob_fake:.1%})")
     for detail in details[:6]:
         logger.info(f"  {detail}")
     
-    return verdict, prob_real, prob_ai, details[:6]
+    return verdict, prob_real, prob_fake, details[:6]
 
 
 # ─────────────────────────────────────────────────────────────
 #  ENDPOINTS
 # ─────────────────────────────────────────────────────────────
-
 @app.get("/")
 def root():
     return {"message": "Audio Deepfake Detector API - Advanced AI Voice Detection"}
@@ -553,6 +545,7 @@ async def analyze_audio(file: UploadFile = File(...)):
     if duration < 2.0:
         raise HTTPException(status_code=422, detail=f"Audio too short ({duration}s). Need at least 2 seconds.")
     
+    # Extract features and classify
     try:
         features = extract_advanced_features(audio, sr)
         verdict, conf_real, conf_fake, indicators = classify_audio(features)
@@ -564,16 +557,17 @@ async def analyze_audio(file: UploadFile = File(...)):
             "verdict": verdict,
             "confidence_real": conf_real,
             "confidence_fake": conf_fake,
-            "method": "ai_optimized_v3",
+            "method": "advanced_heuristic",
             "features": {
                 "pitch_variation": f"{features['pitch_std']:.1f}",
-                "mfcc_variance": round(features['mfcc_variance'], 2),
+                "mfcc_variation": round(features['mfcc_std_mean'], 2),
                 "energy_variation": round(features['rms_std'], 4),
                 "dynamic_range": f"{features['dynamic_range']:.1f}",
                 "spectral_flatness": round(features['flatness_mean'], 5),
             },
-            "indicators": indicators
+            "indicators": indicators[:4]  # Return top indicators
         }
     except Exception as e:
         logger.error(f"Analysis error: {e}")
         raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
+        

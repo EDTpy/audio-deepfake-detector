@@ -7,12 +7,19 @@ import io
 import logging
 from scipy import stats
 from scipy.signal import find_peaks
+import os
 
 app = FastAPI(title="Audio Deepfake Detector")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allows any frontend to connect
+    allow_origins=[
+        "http://localhost:5173",
+        "http://localhost:5174", 
+        "https://audio-deepfake-detector-xi.vercel.app",
+        "https://*.vercel.app",
+        "*"
+    ],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -21,53 +28,48 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────────────────────
-#  ADVANCED FEATURE EXTRACTION FOR AI VOICE DETECTION
-#  Specifically designed to catch ElevenLabs and modern TTS
+#  ADVANCED FEATURE EXTRACTION (Full Version)
 # ─────────────────────────────────────────────────────────────
 
 def extract_advanced_features(audio: np.ndarray, sr: int) -> dict:
-    """Extract features that reveal AI-generated artifacts"""
+    """Extract comprehensive features for AI voice detection"""
     
-    # Ensure minimum length
+    # Ensure minimum length (3 seconds minimum for reliable analysis)
     min_samples = sr * 3
     if len(audio) < min_samples:
         audio = np.pad(audio, (0, min_samples - len(audio)))
     
-    # Trim silence
+    # Trim silence from beginning and end
     audio_trimmed, _ = librosa.effects.trim(audio, top_db=25)
-    if len(audio_trimmed) > sr * 0.5:
+    if len(audio_trimmed) > 0:
         audio = audio_trimmed
     
     # Normalize
-    peak = np.abs(audio).max()
-    if peak > 0:
-        audio = audio / peak
+    audio = audio / (np.abs(audio).max() + 1e-8)
     
     hop_length = 256
     n_fft = 2048
     
     # ─────────────────────────────────────────────────────────
-    # 1. MFCC FEATURES (Key for detecting synthetic artifacts)
+    # MFCC FEATURES (20 coefficients)
     # ─────────────────────────────────────────────────────────
-    mfcc = librosa.feature.mfcc(y=audio, sr=sr, n_mfcc=20, hop_length=hop_length)
+    mfcc = librosa.feature.mfcc(y=audio, sr=sr, n_mfcc=20, n_fft=n_fft, hop_length=hop_length)
     mfcc_delta = librosa.feature.delta(mfcc)
     mfcc_delta2 = librosa.feature.delta(mfcc, order=2)
     
     # MFCC statistics - AI voices have less variation
+    mfcc_variance = float(np.var(mfcc))
     mfcc_std_mean = float(np.std(mfcc, axis=1).mean())
     mfcc_std_std = float(np.std(mfcc, axis=1).std())
     mfcc_delta_std = float(np.std(mfcc_delta))
     mfcc_delta2_std = float(np.std(mfcc_delta2))
-    
-    # MFCC high-frequency coefficients (reveal synthesis artifacts)
     mfcc_high_mean = float(mfcc[10:].mean())
     mfcc_high_std = float(mfcc[10:].std())
     
     # ─────────────────────────────────────────────────────────
-    # 2. PITCH FEATURES (AI voices are too stable)
+    # PITCH FEATURES (Using multiple methods)
     # ─────────────────────────────────────────────────────────
     try:
-        # Use multiple pitch detection methods
         # Method 1: piptrack
         pitches, magnitudes = librosa.piptrack(y=audio, sr=sr, hop_length=hop_length)
         pitch_values = []
@@ -104,22 +106,24 @@ def extract_advanced_features(audio: np.ndarray, sr: int) -> dict:
         pitch_std, pitch_range, pitch_mean, pitch_jitter, yin_std = 0, 0, 0, 0, 0
     
     # ─────────────────────────────────────────────────────────
-    # 3. SPECTRAL FEATURES (AI has unnatural spectral patterns)
+    # SPECTRAL FEATURES
     # ─────────────────────────────────────────────────────────
     stft = np.abs(librosa.stft(audio, n_fft=n_fft, hop_length=hop_length))
     freqs = librosa.fft_frequencies(sr=sr, n_fft=n_fft)
     
     # Spectral centroid
     spectral_centroids = librosa.feature.spectral_centroid(y=audio, sr=sr, hop_length=hop_length)[0]
-    centroid_std = float(np.std(spectral_centroids))
     centroid_mean = float(np.mean(spectral_centroids))
+    centroid_std = float(np.std(spectral_centroids))
     
     # Spectral bandwidth
     spectral_bandwidth = librosa.feature.spectral_bandwidth(y=audio, sr=sr, hop_length=hop_length)[0]
+    bandwidth_mean = float(np.mean(spectral_bandwidth))
     bandwidth_std = float(np.std(spectral_bandwidth))
     
     # Spectral rolloff
     spectral_rolloff = librosa.feature.spectral_rolloff(y=audio, sr=sr, hop_length=hop_length)[0]
+    rolloff_mean = float(np.mean(spectral_rolloff))
     rolloff_std = float(np.std(spectral_rolloff))
     
     # Spectral flatness (tonal vs noise)
@@ -133,7 +137,7 @@ def extract_advanced_features(audio: np.ndarray, sr: int) -> dict:
     contrast_std = float(np.std(spectral_contrast))
     
     # ─────────────────────────────────────────────────────────
-    # 4. HIGH-FREQUENCY ANALYSIS (AI often has unnatural HF)
+    # HIGH-FREQUENCY ANALYSIS
     # ─────────────────────────────────────────────────────────
     hf_mask = freqs > 6000
     vhf_mask = freqs > 10000
@@ -164,7 +168,7 @@ def extract_advanced_features(audio: np.ndarray, sr: int) -> dict:
         spectral_slope = 0
     
     # ─────────────────────────────────────────────────────────
-    # 5. TEMPORAL FEATURES (AI has unnatural smoothness)
+    # TEMPORAL FEATURES
     # ─────────────────────────────────────────────────────────
     # RMS energy
     rms = librosa.feature.rms(y=audio, hop_length=hop_length)[0]
@@ -186,7 +190,7 @@ def extract_advanced_features(audio: np.ndarray, sr: int) -> dict:
     energy_entropy = float(-np.sum(rms_normalized * np.log2(rms_normalized + 1e-8)))
     
     # ─────────────────────────────────────────────────────────
-    # 6. ARTIFACT DETECTION (Specific to TTS/vocoders)
+    # ARTIFACT DETECTION (Specific to TTS/vocoders)
     # ─────────────────────────────────────────────────────────
     # Spectral flux (rate of spectral change)
     flux = np.sqrt(np.mean(np.diff(stft, axis=1) ** 2, axis=0))
@@ -199,9 +203,8 @@ def extract_advanced_features(audio: np.ndarray, sr: int) -> dict:
     
     # Formant bandwidth (AI often has unnatural formants)
     try:
-        from scipy.signal import find_peaks
         formant_widths = []
-        for frame in stft[:, :50].T:  # Check first 50 frames
+        for frame in stft[:, :50].T:
             peaks, properties = find_peaks(frame, height=np.percentile(frame, 70), width=2)
             if len(peaks) > 0:
                 widths = properties['widths']
@@ -233,6 +236,7 @@ def extract_advanced_features(audio: np.ndarray, sr: int) -> dict:
     
     return {
         # MFCC features
+        "mfcc_variance": mfcc_variance,
         "mfcc_std_mean": mfcc_std_mean,
         "mfcc_std_std": mfcc_std_std,
         "mfcc_delta_std": mfcc_delta_std,
@@ -247,8 +251,11 @@ def extract_advanced_features(audio: np.ndarray, sr: int) -> dict:
         "yin_std": yin_std,
         
         # Spectral features
+        "centroid_mean": centroid_mean,
         "centroid_std": centroid_std,
+        "bandwidth_mean": bandwidth_mean,
         "bandwidth_std": bandwidth_std,
+        "rolloff_mean": rolloff_mean,
         "rolloff_std": rolloff_std,
         "flatness_mean": flatness_mean,
         "flatness_std": flatness_std,
@@ -264,12 +271,15 @@ def extract_advanced_features(audio: np.ndarray, sr: int) -> dict:
         
         # Temporal features
         "rms_std": rms_std,
+        "rms_mean": rms_mean,
         "zcr_std": zcr_std,
+        "zcr_mean": zcr_mean,
         "dynamic_range": dynamic_range,
         "energy_entropy": energy_entropy,
         
         # Artifact features
         "flux_std": flux_std,
+        "flux_mean": flux_mean,
         "spec_irregularity": spec_irregularity,
         "avg_formant_width": avg_formant_width,
         "formant_width_std": formant_width_std,
@@ -279,318 +289,237 @@ def extract_advanced_features(audio: np.ndarray, sr: int) -> dict:
     }
 
 
+# ─────────────────────────────────────────────────────────────
+#  AGGRESSIVE AI CLASSIFIER (Tuned for ElevenLabs)
+# ─────────────────────────────────────────────────────────────
+
 def classify_audio(features: dict) -> tuple:
-    """
-    Classify audio as REAL or FAKE using multi-dimensional analysis
-    Specifically tuned to catch ElevenLabs and modern TTS
-    """
+    """Aggressive classification specifically tuned for modern AI voices"""
     
-    scores = []
+    ai_score = 0
+    human_score = 0
     details = []
     
-    # ─────────────────────────────────────────────────────────
-    # 1. PITCH VARIATION (HIGH WEIGHT - Most discriminative)
-    # AI voices are too stable, humans vary naturally
-    # ─────────────────────────────────────────────────────────
+    # 1. PITCH VARIATION (HIGHEST WEIGHT - Most discriminative)
     pitch_std = features["pitch_std"]
-    if pitch_std > 35:
-        score = 1.0  # Very natural human
-        detail = "Excellent natural pitch variation"
-    elif pitch_std > 22:
-        score = 0.7
-        detail = "Good natural pitch variation"
-    elif pitch_std > 14:
-        score = 0.3
-        detail = "Moderate pitch variation"
-    elif pitch_std > 7:
-        score = -0.4  # Suspiciously stable
-        detail = "Limited pitch variation (possible AI)"
-    elif pitch_std > 0:
-        score = -0.8  # Very flat = AI
-        detail = "Very flat pitch pattern (AI characteristic)"
+    if pitch_std < 8:
+        ai_score += 30
+        details.append(f"⚠️ Very flat pitch ({pitch_std:.1f}Hz) - AI characteristic")
+    elif pitch_std < 15:
+        ai_score += 15
+        details.append(f"⚠️ Limited pitch variation ({pitch_std:.1f}Hz) - suspicious")
+    elif pitch_std > 25:
+        human_score += 20
+        details.append(f"✅ Good pitch variation ({pitch_std:.1f}Hz) - human-like")
+    elif pitch_std > 18:
+        human_score += 10
+        details.append(f"✅ Natural pitch variation ({pitch_std:.1f}Hz)")
     else:
-        score = -0.5
-        detail = "Could not detect pitch"
+        ai_score += 5
     
-    scores.append(score * 3.5)
-    details.append(f"Pitch variation: {pitch_std:.1f}Hz - {detail}")
-    
-    # ─────────────────────────────────────────────────────────
-    # 2. MFCC CONSISTENCY (AI has unnaturally consistent MFCCs)
-    # ─────────────────────────────────────────────────────────
-    mfcc_std = features["mfcc_std_mean"]
-    if mfcc_std > 25:
-        score = 1.0
-        detail = "Natural MFCC variation"
-    elif mfcc_std > 16:
-        score = 0.6
-        detail = "Good MFCC variation"
-    elif mfcc_std > 10:
-        score = 0.1
-        detail = "Moderate MFCC variation"
-    elif mfcc_std > 5:
-        score = -0.5
-        detail = "Low MFCC variation (possible AI)"
+    # 2. MFCC CONSISTENCY (AI has less variation)
+    mfcc_var = features["mfcc_variance"]
+    if mfcc_var < 60:
+        ai_score += 25
+        details.append(f"⚠️ Very consistent MFCCs ({mfcc_var:.1f}) - AI artifact")
+    elif mfcc_var < 120:
+        ai_score += 12
+        details.append(f"⚠️ Limited MFCC variation ({mfcc_var:.1f}) - suspicious")
+    elif mfcc_var > 250:
+        human_score += 15
+        details.append(f"✅ Natural MFCC variation ({mfcc_var:.1f}) - human-like")
+    elif mfcc_var > 180:
+        human_score += 8
+        details.append(f"✅ Good MFCC variation ({mfcc_var:.1f})")
     else:
-        score = -0.9
-        detail = "Very low MFCC variation (AI characteristic)"
+        ai_score += 3
     
-    scores.append(score * 2.5)
-    details.append(f"MFCC consistency: {mfcc_std:.1f} - {detail}")
-    
-    # ─────────────────────────────────────────────────────────
-    # 3. ENERGY VARIATION (AI has compressed dynamics)
-    # ─────────────────────────────────────────────────────────
-    rms_std = features["rms_std"]
-    if rms_std > 0.09:
-        score = 1.0
-        detail = "Natural energy variation"
-    elif rms_std > 0.06:
-        score = 0.6
-        detail = "Good energy variation"
-    elif rms_std > 0.035:
-        score = 0.1
-        detail = "Moderate energy variation"
-    elif rms_std > 0.015:
-        score = -0.5
-        detail = "Limited energy variation (possible AI)"
-    else:
-        score = -0.9
-        detail = "Very flat energy (AI characteristic)"
-    
-    scores.append(score * 2.0)
-    details.append(f"Energy variation: {rms_std:.4f} - {detail}")
-    
-    # ─────────────────────────────────────────────────────────
-    # 4. DYNAMIC RANGE (AI has compressed dynamics)
-    # ─────────────────────────────────────────────────────────
+    # 3. DYNAMIC RANGE (AI has compressed dynamics)
     dyn_range = features["dynamic_range"]
-    if dyn_range > 35:
-        score = 1.0
-        detail = "Excellent dynamic range"
-    elif dyn_range > 25:
-        score = 0.7
-        detail = "Good dynamic range"
-    elif dyn_range > 16:
-        score = 0.2
-        detail = "Moderate dynamic range"
-    elif dyn_range > 8:
-        score = -0.5
-        detail = "Limited dynamic range (possible AI)"
+    if dyn_range < 12:
+        ai_score += 20
+        details.append(f"⚠️ Highly compressed dynamics ({dyn_range:.1f}dB) - AI processing")
+    elif dyn_range < 20:
+        ai_score += 10
+        details.append(f"⚠️ Limited dynamic range ({dyn_range:.1f}dB) - suspicious")
+    elif dyn_range > 35:
+        human_score += 15
+        details.append(f"✅ Excellent dynamic range ({dyn_range:.1f}dB) - human-like")
+    elif dyn_range > 28:
+        human_score += 8
+        details.append(f"✅ Good dynamic range ({dyn_range:.1f}dB)")
     else:
-        score = -0.9
-        detail = "Very compressed dynamics (AI characteristic)"
+        ai_score += 3
     
-    scores.append(score * 1.5)
-    details.append(f"Dynamic range: {dyn_range:.1f}dB - {detail}")
-    
-    # ─────────────────────────────────────────────────────────
-    # 5. SPECTRAL FLATNESS (AI too clean or too noisy)
-    # ─────────────────────────────────────────────────────────
+    # 4. SPECTRAL FLATNESS (AI too clean or unnatural)
     flatness = features["flatness_mean"]
-    if 0.025 < flatness < 0.09:
-        score = 0.8  # Natural noise floor
-        detail = "Natural spectral flatness"
-    elif 0.015 < flatness < 0.15:
-        score = 0.2
-        detail = "Acceptable spectral flatness"
-    elif flatness < 0.008:
-        score = -0.7  # Too clean = AI synthesis
-        detail = "Too clean (AI synthesis artifact)"
-    elif flatness > 0.2:
-        score = -0.5
-        detail = "Too noisy (possible processing artifact)"
+    if flatness < 0.008:
+        ai_score += 18
+        details.append(f"⚠️ Too clean spectral flatness ({flatness:.5f}) - AI synthesis")
+    elif flatness < 0.015:
+        ai_score += 8
+        details.append(f"⚠️ Unnaturally clean ({flatness:.5f}) - possible AI")
+    elif flatness > 0.15:
+        ai_score += 8
+        details.append(f"⚠️ Unnatural spectral flatness ({flatness:.5f}) - artifact")
+    elif 0.025 < flatness < 0.08:
+        human_score += 12
+        details.append(f"✅ Natural spectral flatness ({flatness:.5f}) - human-like")
+    elif 0.018 < flatness < 0.12:
+        human_score += 5
     else:
-        score = 0.0
-        detail = "Borderline spectral flatness"
+        ai_score += 2
     
-    scores.append(score * 1.5)
-    details.append(f"Spectral flatness: {flatness:.5f} - {detail}")
+    # 5. ENERGY VARIATION (AI has less energy fluctuation)
+    rms_std = features["rms_std"]
+    if rms_std < 0.02:
+        ai_score += 18
+        details.append(f"⚠️ Very stable energy ({rms_std:.4f}) - AI characteristic")
+    elif rms_std < 0.035:
+        ai_score += 8
+        details.append(f"⚠️ Limited energy variation ({rms_std:.4f}) - suspicious")
+    elif rms_std > 0.07:
+        human_score += 12
+        details.append(f"✅ Natural energy variation ({rms_std:.4f}) - human-like")
+    elif rms_std > 0.05:
+        human_score += 6
+        details.append(f"✅ Good energy variation ({rms_std:.4f})")
+    else:
+        ai_score += 2
     
-    # ─────────────────────────────────────────────────────────
-    # 6. HIGH-FREQUENCY ANALYSIS (AI has unnatural HF)
-    # ─────────────────────────────────────────────────────────
+    # 6. HIGH-FREQUENCY CONTENT (AI often has unnatural HF)
     hf_energy = features["hf_energy_mean"]
-    hf_variation = features["hf_variation"]
-    
-    hf_score = 0
-    if hf_energy > 0.05 and hf_variation > 0.01:
-        hf_score = 0.6
-        detail = "Natural high-frequency content"
-    elif hf_energy > 0.02 and hf_variation > 0.005:
-        hf_score = 0.1
-        detail = "Limited high-frequency variation"
+    hf_var = features["hf_variation"]
+    if hf_energy < 0.005:
+        ai_score += 15
+        details.append("⚠️ Missing high frequencies - bandlimited AI")
     elif hf_energy < 0.01:
-        hf_score = -0.6
-        detail = "Missing high frequencies (bandlimited AI)"
+        ai_score += 7
+        details.append("⚠️ Very limited high frequencies - possible AI")
+    elif hf_var < 0.0015:
+        ai_score += 10
+        details.append("⚠️ Unnatural high-frequency consistency - AI artifact")
+    elif hf_var < 0.003:
+        ai_score += 4
+    elif hf_energy > 0.02 and hf_var > 0.005:
+        human_score += 10
+        details.append("✅ Natural high-frequency content - human-like")
     else:
-        hf_score = -0.3
-        detail = "Unnatural high-frequency pattern"
+        human_score += 3
     
-    scores.append(hf_score * 1.2)
-    details.append(f"High-frequency: {hf_energy:.4f} - {detail}")
-    
-    # ─────────────────────────────────────────────────────────
-    # 7. SPECTRAL IRREGULARITY (AI too smooth or too rough)
-    # ─────────────────────────────────────────────────────────
-    irregularity = features["spec_irregularity"]
-    if 0.2 < irregularity < 0.6:
-        score = 0.7
-        detail = "Natural spectral irregularity"
-    elif 0.1 < irregularity < 1.0:
-        score = 0.2
-        detail = "Acceptable spectral pattern"
-    elif irregularity < 0.08:
-        score = -0.6
-        detail = "Too smooth (AI synthesis artifact)"
-    elif irregularity > 1.2:
-        score = -0.4
-        detail = "Too irregular (possible artifact)"
+    # 7. SPECTRAL FLUX (AI has smoother transitions)
+    flux_std = features["flux_std"]
+    if flux_std < 12:
+        ai_score += 15
+        details.append(f"⚠️ Very smooth spectral transitions ({flux_std:.1f}) - AI")
+    elif flux_std < 25:
+        ai_score += 7
+        details.append(f"⚠️ Limited spectral variation ({flux_std:.1f}) - suspicious")
+    elif flux_std > 60:
+        human_score += 10
+        details.append(f"✅ Natural spectral variation ({flux_std:.1f}) - human-like")
+    elif flux_std > 45:
+        human_score += 5
     else:
-        score = 0.0
-        detail = "Borderline spectral pattern"
+        ai_score += 2
     
-    scores.append(score * 1.2)
-    details.append(f"Spectral irregularity: {irregularity:.3f} - {detail}")
-    
-    # ─────────────────────────────────────────────────────────
-    # 8. MFCC DELTA VARIATION (Temporal dynamics)
-    # ─────────────────────────────────────────────────────────
-    delta_std = features["mfcc_delta_std"]
-    if delta_std > 5.5:
-        score = 0.8
-        detail = "Natural temporal dynamics"
-    elif delta_std > 3.5:
-        score = 0.3
-        detail = "Moderate temporal dynamics"
-    elif delta_std > 2.0:
-        score = -0.3
-        detail = "Limited temporal dynamics"
-    else:
-        score = -0.7
-        detail = "Very smooth transitions (AI characteristic)"
-    
-    scores.append(score * 1.2)
-    details.append(f"MFCC dynamics: {delta_std:.2f} - {detail}")
-    
-    # ─────────────────────────────────────────────────────────
-    # 9. ZCR VARIATION (Captures natural consonant transitions)
-    # ─────────────────────────────────────────────────────────
-    zcr_std = features["zcr_std"]
-    if zcr_std > 0.08:
-        score = 0.8
-        detail = "Natural consonant variation"
-    elif zcr_std > 0.05:
-        score = 0.4
-        detail = "Good consonant variation"
-    elif zcr_std > 0.03:
-        score = -0.1
-        detail = "Limited consonant variation"
-    elif zcr_std > 0.015:
-        score = -0.5
-        detail = "Very limited variation (possible AI)"
-    else:
-        score = -0.8
-        detail = "Almost no consonant transitions (AI characteristic)"
-    
-    scores.append(score * 1.0)
-    details.append(f"ZCR variation: {zcr_std:.4f} - {detail}")
-    
-    # ─────────────────────────────────────────────────────────
-    # 10. ENERGY ENTROPY (Predictability of energy patterns)
-    # AI has more predictable (lower entropy) energy patterns
-    # ─────────────────────────────────────────────────────────
+    # 8. ENERGY ENTROPY (AI has more predictable patterns)
     entropy = features["energy_entropy"]
-    if entropy > 6.5:
-        score = 0.7
-        detail = "Unpredictable energy (natural)"
-    elif entropy > 5.0:
-        score = 0.3
-        detail = "Moderately unpredictable"
-    elif entropy > 3.5:
-        score = -0.3
-        detail = "Somewhat predictable (possible AI)"
-    else:
-        score = -0.7
-        detail = "Very predictable energy (AI characteristic)"
+    if entropy < 4.0:
+        ai_score += 12
+        details.append(f"⚠️ Very predictable energy ({entropy:.2f}) - AI pattern")
+    elif entropy < 5.5:
+        ai_score += 5
+        details.append(f"⚠️ Somewhat predictable energy ({entropy:.2f}) - suspicious")
+    elif entropy > 7.0:
+        human_score += 8
+        details.append(f"✅ Natural energy unpredictability ({entropy:.2f}) - human-like")
+    elif entropy > 6.0:
+        human_score += 4
     
-    scores.append(score * 1.0)
-    details.append(f"Energy entropy: {entropy:.2f} - {detail}")
+    # 9. MFCC DELTA VARIATION (temporal dynamics)
+    delta_var = features["mfcc_delta_std"]
+    if delta_var < 3.5:
+        ai_score += 12
+        details.append(f"⚠️ Very smooth MFCC transitions ({delta_var:.1f}) - AI")
+    elif delta_var < 5.5:
+        ai_score += 5
+    elif delta_var > 9:
+        human_score += 8
+        details.append(f"✅ Natural MFCC dynamics ({delta_var:.1f})")
     
-    # ─────────────────────────────────────────────────────────
-    # 11. PITCH JITTER (Natural speech has irregular pitch changes)
-    # ─────────────────────────────────────────────────────────
+    # 10. ZCR VARIATION (consonant transitions)
+    zcr_std = features["zcr_std"]
+    if zcr_std < 0.018:
+        ai_score += 10
+        details.append("⚠️ Limited consonant variation - AI speech pattern")
+    elif zcr_std < 0.03:
+        ai_score += 4
+    elif zcr_std > 0.07:
+        human_score += 8
+        details.append("✅ Rich consonant variation - human-like")
+    elif zcr_std > 0.05:
+        human_score += 4
+    
+    # 11. SPECTRAL IRREGULARITY
+    irregularity = features["spec_irregularity"]
+    if irregularity < 0.12:
+        ai_score += 10
+        details.append(f"⚠️ Too smooth spectral pattern ({irregularity:.3f}) - AI")
+    elif irregularity < 0.25:
+        ai_score += 4
+    elif irregularity > 0.6:
+        human_score += 6
+    elif irregularity > 0.4:
+        human_score += 3
+    
+    # 12. PITCH JITTER
     jitter = features["pitch_jitter"]
-    if jitter > 1.2:
-        score = 0.6
-        detail = "Natural pitch jitter"
-    elif jitter > 0.6:
-        score = 0.2
-        detail = "Moderate pitch jitter"
-    elif jitter > 0.2:
-        score = -0.4
-        detail = "Low pitch jitter (possible AI)"
-    elif jitter > 0:
-        score = -0.7
-        detail = "Very low pitch jitter (AI characteristic)"
+    if jitter > 0 and jitter < 0.3:
+        ai_score += 8
+        details.append(f"⚠️ Very low pitch jitter ({jitter:.2f}) - AI")
+    elif jitter > 0.8:
+        human_score += 6
+    
+    # Calculate final confidence
+    total_score = ai_score + human_score
+    if total_score > 0:
+        ai_percentage = (ai_score / total_score) * 100
     else:
-        score = 0.0
-        detail = "Could not measure pitch jitter"
+        ai_percentage = 50
     
-    scores.append(score * 0.8)
-    details.append(f"Pitch jitter: {jitter:.2f} - {detail}")
-    
-    # ─────────────────────────────────────────────────────────
-    # 12. FORMANT WIDTH (AI has unnaturally narrow/wide formants)
-    # ─────────────────────────────────────────────────────────
-    formant_width = features["avg_formant_width"]
-    if 5 < formant_width < 15:
-        score = 0.5
-        detail = "Natural formant structure"
-    elif 3 < formant_width < 25:
-        score = 0.0
-        detail = "Acceptable formant structure"
-    elif formant_width > 0:
-        score = -0.5
-        detail = "Unnatural formant width (possible AI)"
+    # Aggressive threshold - tuned for ElevenLabs detection
+    if ai_percentage > 50:
+        verdict = "FAKE"
+        confidence = min(0.95, (ai_percentage - 45) / 55)
+        prob_ai = round(confidence, 4)
+        prob_real = round(1 - prob_ai, 4)
+    elif ai_percentage > 35:
+        verdict = "FAKE"
+        confidence = min(0.90, (ai_percentage - 30) / 70)
+        prob_ai = round(confidence, 4)
+        prob_real = round(1 - prob_ai, 4)
     else:
-        score = -0.2
-        detail = "Could not analyze formants"
-    
-    scores.append(score * 0.8)
-    details.append(f"Formant width: {formant_width:.1f} - {detail}")
-    
-    # Calculate weighted score
-    total_weight = sum([3.5, 2.5, 2.0, 1.5, 1.5, 1.2, 1.2, 1.2, 1.0, 1.0, 0.8, 0.8])
-    weighted_sum = sum(scores)
-    norm_score = weighted_sum / total_weight
-    
-    # Apply non-linear transformation for better separation
-    # This makes the decision boundary clearer
-    if norm_score > 0:
-        prob_human = 0.5 + (norm_score / 2)
-    else:
-        prob_human = 0.5 / (1 + abs(norm_score))
-    
-    # Calibrate
-    prob_human = np.clip(prob_human, 0.05, 0.95)
-    prob_human = round(prob_human, 4)
-    prob_fake = round(1.0 - prob_human, 4)
-    verdict = "REAL" if prob_human >= 0.5 else "FAKE"
+        verdict = "REAL"
+        confidence = min(0.95, 1 - (ai_percentage / 35))
+        prob_real = round(confidence, 4)
+        prob_ai = round(1 - prob_real, 4)
     
     # Log detailed analysis
-    logger.info(f"=== Analysis Results ===")
-    logger.info(f"Verdict: {verdict} (Human: {prob_human:.2%}, AI: {prob_fake:.2%})")
-    logger.info(f"Score: {norm_score:.3f}")
-    for detail in details[:5]:  # Show top 5 indicators
+    logger.info(f"=== AI Detection Results ===")
+    logger.info(f"AI Score: {ai_score}, Human Score: {human_score}")
+    logger.info(f"AI Percentage: {ai_percentage:.1f}%")
+    logger.info(f"Verdict: {verdict} (Real: {prob_real:.1%}, AI: {prob_ai:.1%})")
+    for detail in details[:6]:
         logger.info(f"  {detail}")
     
-    return verdict, prob_human, prob_fake, details
+    return verdict, prob_real, prob_ai, details[:6]
 
 
 # ─────────────────────────────────────────────────────────────
 #  ENDPOINTS
 # ─────────────────────────────────────────────────────────────
+
 @app.get("/")
 def root():
     return {"message": "Audio Deepfake Detector API - Advanced AI Voice Detection"}
@@ -624,7 +553,6 @@ async def analyze_audio(file: UploadFile = File(...)):
     if duration < 2.0:
         raise HTTPException(status_code=422, detail=f"Audio too short ({duration}s). Need at least 2 seconds.")
     
-    # Extract features and classify
     try:
         features = extract_advanced_features(audio, sr)
         verdict, conf_real, conf_fake, indicators = classify_audio(features)
@@ -636,17 +564,16 @@ async def analyze_audio(file: UploadFile = File(...)):
             "verdict": verdict,
             "confidence_real": conf_real,
             "confidence_fake": conf_fake,
-            "method": "advanced_heuristic",
+            "method": "ai_optimized_v3",
             "features": {
                 "pitch_variation": f"{features['pitch_std']:.1f}",
-                "mfcc_variation": round(features['mfcc_std_mean'], 2),
+                "mfcc_variance": round(features['mfcc_variance'], 2),
                 "energy_variation": round(features['rms_std'], 4),
                 "dynamic_range": f"{features['dynamic_range']:.1f}",
                 "spectral_flatness": round(features['flatness_mean'], 5),
             },
-            "indicators": indicators[:4]  # Return top indicators
+            "indicators": indicators
         }
     except Exception as e:
         logger.error(f"Analysis error: {e}")
         raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
-        

@@ -10,6 +10,7 @@ export default function App() {
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [page, setPage] = useState("analyze");
   const API_URL = "https://audio-deepfake-detector-x07i.onrender.com";
 
   async function handleAnalyze(file) {
